@@ -283,6 +283,10 @@ class GreenboneHostSeveritySensor(
     def available(self) -> bool:
         return super().available and self._host_label in self.coordinator.data["by_host"]
 
+    @property
+    def native_value(self) -> int:
+        return self._host_data.get(self._severity, 0)
+
 
 class GreenboneTaskProgressSensor(CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity):
     """Current scan progress (0-100) for a single GVM task, plus its status as an attribute.
@@ -331,7 +335,3 @@ class GreenboneTaskProgressSensor(CoordinatorEntity[GreenboneDataUpdateCoordinat
     def extra_state_attributes(self) -> dict[str, Any]:
         task = self._task
         return {"status": task["status"] if task else None}
-
-    @property
-    def native_value(self) -> int:
-        return self._host_data.get(self._severity, 0)
