@@ -80,11 +80,49 @@ def _empty_counts() -> dict[str, int]:
     return {"critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0}
 
 
+def _empty_host_details() -> dict[str, Any]:
+    return {"ports": set(), "operating_systems": set(), "applications": set()}
+
+
 def _host_label(host_elem) -> str:
     """Prefer the scan's resolved hostname over the raw IP, falling back to the IP."""
     hostname = host_elem.findtext("hostname")
     ip = (host_elem.text or "").strip()
     return hostname.strip() if hostname and hostname.strip() else ip
+
+
+# OID of the "CPE Inventory" NVT, which reports every CPE (operating system, hardware,
+# or application) it identified for a host as pipe-separated "<host>|<cpe>" lines in its
+# description - the only place this data shows up in GMP's results, there's no separate
+# structured field for it. Matched by OID rather than name since the NVT's human-readable
+# name could vary by Greenbone feed version/locale, but the OID is permanent.
+_CPE_INVENTORY_OID = "1.3.6.1.4.1.25623.1.0.810002"
+
+# Placeholder "port" values GMP uses for results that aren't about a specific network
+# port (host details, general CPE findings, etc.) - these aren't real open ports.
+_NON_PORT_PREFIXES = ("general/",)
+
+
+def _parse_cpe_inventory(description: str) -> tuple[set[str], set[str]]:
+    """Split a CPE Inventory result's description into (os_cpes, app_cpes).
+
+    Each line looks like "<host>|<cpe-string>", e.g. "10.0.0.1|cpe:/o:linux:kernel".
+    cpe:/o:... is an operating system, cpe:/a:... is an application, cpe:/h:... is
+    hardware (ignored here - not relevant to this integration).
+    """
+    os_cpes: set[str] = set()
+    app_cpes: set[str] = set()
+    for line in description.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        _, _, cpe = line.partition("|")
+        cpe = cpe.strip()
+        if cpe.startswith("cpe:/o:"):
+            os_cpes.add(cpe)
+        elif cpe.startswith("cpe:/a:"):
+            app_cpes.add(cpe)
+    return os_cpes, app_cpes
 
 
 class GreenboneClient:
@@ -101,12 +139,16 @@ class GreenboneClient:
         return Gmp(connection=connection, transform=EtreeCheckCommandTransform())
 
     def get_vulnerability_summary(self) -> dict[str, Any]:
-        """Return global vulnerability counts by severity, a per-host breakdown, and
-        the highest-severity findings, all drawn from each task's latest report.
+        """Return global vulnerability counts by severity, a per-host breakdown
+        (including open ports/OS/applications), the highest-severity findings, and
+        each task's current status/progress - all drawn from each task's latest
+        (or currently in-progress) report.
         """
         global_counts = _empty_counts()
         by_host: dict[str, dict[str, int]] = {}
+        host_details: dict[str, dict[str, Any]] = {}
         top_candidates: list[dict[str, Any]] = []
+        task_summaries: list[dict[str, Any]] = []
 
         try:
             with self._connect() as gmp:
@@ -115,6 +157,15 @@ class GreenboneClient:
 
                 report_ids: list[str] = []
                 for task in tasks.findall("task"):
+                    task_summaries.append(
+                        {
+                            "id": task.get("id"),
+                            "name": task.findtext("name"),
+                            "status": task.findtext("status"),
+                            "progress": int(task.findtext("progress") or 0),
+                        }
+                    )
+
                     # A Running task's most recent data lives under current_report,
                     # not last_report (which only ever points at a *completed* run,
                     # and is absent entirely until the task's first run finishes).
@@ -129,14 +180,27 @@ class GreenboneClient:
                         filter_string=f"apply_overrides=0 min_qod=70 rows=-1 report_id={report_id}"
                     )
                     for result in results.findall("result"):
+                        host_elem = result.find("host")
+                        host_label = _host_label(host_elem) if host_elem is not None else "unknown"
+                        details = host_details.setdefault(host_label, _empty_host_details())
+
+                        nvt = result.find("nvt")
+                        port = result.findtext("port") or ""
+                        if port and not port.startswith(_NON_PORT_PREFIXES):
+                            details["ports"].add(port)
+
+                        if nvt is not None and nvt.get("oid") == _CPE_INVENTORY_OID:
+                            os_cpes, app_cpes = _parse_cpe_inventory(
+                                result.findtext("description") or ""
+                            )
+                            details["operating_systems"].update(os_cpes)
+                            details["applications"].update(app_cpes)
+
                         severity_text = result.findtext("severity")
                         severity = float(severity_text) if severity_text else 0.0
                         bucket = _severity_bucket(severity)
                         if bucket is None:
                             continue
-
-                        host_elem = result.find("host")
-                        host_label = _host_label(host_elem) if host_elem is not None else "unknown"
 
                         global_counts[bucket] += 1
                         global_counts["total"] += 1
@@ -146,7 +210,6 @@ class GreenboneClient:
                         host_counts["total"] += 1
 
                         if bucket in ("critical", "high"):
-                            nvt = result.find("nvt")
                             cve_ref = None
                             if nvt is not None:
                                 cve_ref = nvt.find("refs/ref[@type='cve']")
@@ -168,8 +231,35 @@ class GreenboneClient:
             key=lambda f: (0 if f["severity"] == "critical" else 1, -f["cvss_score"])
         )
 
+        # Every host that ever shows up should get a details entry, even if it had no
+        # severity-bucketed findings at all (by_host only tracks hosts with findings).
+        for host_label in host_details:
+            by_host.setdefault(host_label, _empty_counts())
+
+        host_details_out = {
+            host: {
+                "ports": sorted(details["ports"]),
+                "operating_systems": sorted(details["operating_systems"]),
+                "applications": sorted(details["applications"]),
+            }
+            for host, details in host_details.items()
+        }
+
         return {
             "global": global_counts,
             "by_host": by_host,
+            "host_details": host_details_out,
             "top_vulnerabilities": top_candidates[:15],
+            "tasks": task_summaries,
         }
+
+    def start_task(self, task_id: str) -> None:
+        """Start (or resume) a scan task."""
+        try:
+            with self._connect() as gmp:
+                gmp.authenticate(self._username, self._password)
+                gmp.start_task(task_id)
+        except GvmError as err:
+            raise GreenboneError(str(err)) from err
+        except OSError as err:
+            raise GreenboneError(f"Error connecting to Greenbone GMP relay: {err}") from err

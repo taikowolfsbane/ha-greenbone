@@ -30,6 +30,11 @@ class GreenboneDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         self._client = client
 
+    @property
+    def client(self) -> GreenboneClient:
+        """Expose the underlying client so other platforms (e.g. buttons) can act on it."""
+        return self._client
+
     async def _async_update_data(self) -> dict:
         try:
             return await self.hass.async_add_executor_job(

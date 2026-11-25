@@ -104,6 +104,25 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(_add_new_host_sensors))
     _add_new_host_sensors()
 
+    # Tasks are a small, user-managed set (you create them deliberately in GVM), unlike
+    # scanned hosts, so dynamically adding one sensor per task doesn't have the same
+    # "dozens of ever-changing entities" problem per-host sensors would.
+    known_tasks: set[str] = set()
+
+    @callback
+    def _add_new_task_sensors() -> None:
+        current_task_ids = {task["id"] for task in coordinator.data["tasks"]}
+        new_task_ids = current_task_ids - known_tasks
+        if not new_task_ids:
+            return
+        known_tasks.update(new_task_ids)
+        async_add_entities(
+            GreenboneTaskProgressSensor(coordinator, entry, task_id) for task_id in new_task_ids
+        )
+
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_task_sensors))
+    _add_new_task_sensors()
+
 
 def _hub_device_info(entry: ConfigEntry) -> dict[str, Any]:
     return {
@@ -215,11 +234,15 @@ class GreenboneHostVulnerabilitySensor(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self._host_data
+        details = self.coordinator.data["host_details"].get(self._host_label, {})
         return {
             "critical": data.get("critical", 0),
             "high": data.get("high", 0),
             "medium": data.get("medium", 0),
             "low": data.get("low", 0),
+            "open_ports": details.get("ports", []),
+            "operating_systems": details.get("operating_systems", []),
+            "applications": details.get("applications", []),
         }
 
 
@@ -259,6 +282,55 @@ class GreenboneHostSeveritySensor(
     @property
     def available(self) -> bool:
         return super().available and self._host_label in self.coordinator.data["by_host"]
+
+
+class GreenboneTaskProgressSensor(CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity):
+    """Current scan progress (0-100) for a single GVM task, plus its status as an attribute.
+
+    This is still just polling-based, at whatever the scan interval (or a manual
+    Refresh Now press) provides - GMP has no push/event stream for this - but a short
+    scan interval or a few manual refreshes gives a reasonably live view while a scan
+    is actively running.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:progress-helper"
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self, coordinator: GreenboneDataUpdateCoordinator, entry: ConfigEntry, task_id: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._task_id = task_id
+        self._attr_unique_id = f"{entry.entry_id}_task_{task_id}_progress"
+        self._attr_device_info = _hub_device_info(entry)
+
+    @property
+    def _task(self) -> dict[str, Any] | None:
+        return next(
+            (t for t in self.coordinator.data["tasks"] if t["id"] == self._task_id), None
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._task is not None
+
+    @property
+    def name(self) -> str | None:
+        task = self._task
+        task_name = task["name"] if task else self._task_id
+        return f"{task_name} Scan Progress"
+
+    @property
+    def native_value(self) -> int | None:
+        task = self._task
+        return task["progress"] if task else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        task = self._task
+        return {"status": task["status"] if task else None}
 
     @property
     def native_value(self) -> int:

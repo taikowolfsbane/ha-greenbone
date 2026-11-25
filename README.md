@@ -13,8 +13,14 @@ same protocol `gvm-tools`/`gvm-cli` and Greenbone's own web UI use internally.
   show up in scan results — no manual configuration needed
 - Hosts are labeled by their resolved **hostname** when GVM's reverse-DNS
   lookup succeeded during the scan, falling back to the IP otherwise
+- Per-host **open ports**, **operating system**, and **applications**
+  detected, as sensor attributes (from GVM's service detection and CPE
+  inventory results)
 - A **Top Critical Vulnerabilities** sensor listing the highest-severity
   findings (name, CVE, CVSS score, host) across every scanned host
+- A **Scan Progress** sensor per task (0–100%, with status as an attribute)
+- A **Start Scan** button per task, to kick off (or resume) a scan from
+  Home Assistant
 - A **Refresh Now** button entity to force an immediate update on demand,
   independent of the scan interval
 - Scan interval is adjustable from the UI after setup (no YAML editing)
@@ -115,19 +121,29 @@ From **Settings → Devices & Services → Greenbone Vulnerabilities → Configu
 - `sensor.vulnerabilities_medium`
 - `sensor.vulnerabilities_low`
 - `sensor.<host>_total` — one per scanned host, with a critical/high/medium/low
-  breakdown available both as entity attributes and as four separate per-host
-  sensors (below). These all live on the integration's single **Greenbone**
-  device, not a device of their own per host — a home-LAN scan can turn up
-  dozens of hosts, and a device-per-host design would mean Home Assistant
-  prompting you to name/assign an area for every single one, forever, as DHCP
-  leases change. Dashboard tooling (e.g. HACS's `auto-entities`) can still
-  target a single host's sensors by their entity IDs.
+  breakdown, open ports, operating system, and applications all available as
+  entity attributes, plus the severity breakdown again as four separate
+  per-host sensors (below). These all live on the integration's single
+  **Greenbone** device, not a device of their own per host — a home-LAN scan
+  can turn up dozens of hosts, and a device-per-host design would mean Home
+  Assistant prompting you to name/assign an area for every single one,
+  forever, as DHCP leases change. Dashboard tooling (e.g. HACS's
+  `auto-entities`) can still target a single host's sensors by their entity
+  IDs.
 - `sensor.<host>_critical` / `_high` / `_medium` / `_low` — the per-host
   severity breakdown as individual entities
 - `sensor.top_critical_vulnerabilities` — count of the highest-severity
   critical/high findings across all scanned hosts; the findings themselves
   (name, CVE, CVSS score, host) are in the `vulnerabilities` attribute as a
   list, since there's no single native entity type for structured records
+- `sensor.<task name>_scan_progress` — one per GVM task, 0–100%, with the
+  task's status (`Running`/`Done`/`Stopped`/etc.) as an attribute. This is
+  still polling-based (GMP has no push/event stream) — set a shorter scan
+  interval, or press Refresh Now a few times, for a tighter-grained view
+  while a scan is actively running
+- `button.<task name>_start_scan` — one per GVM task, starts (or resumes) that
+  task's scan; pressing it while already running surfaces GVM's own error as
+  a Home Assistant notification
 - `button.refresh_now` — forces an immediate refresh of all the above
 
 ## On severity buckets
