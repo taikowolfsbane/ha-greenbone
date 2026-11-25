@@ -1,0 +1,265 @@
+"""Sensor platform for the Greenbone Vulnerabilities integration."""
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from homeassistant.components.sensor import SensorEntity, SensorEntityDescription, SensorStateClass
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN, SEVERITIES
+from .coordinator import GreenboneDataUpdateCoordinator
+
+SEVERITY_ICONS = {
+    "critical": "mdi:shield-alert",
+    "high": "mdi:shield-alert-outline",
+    "medium": "mdi:shield-half-full",
+    "low": "mdi:shield-outline",
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class GreenboneSensorDescription(SensorEntityDescription):
+    """Describes a global (not per-host) Greenbone sensor."""
+
+    value_fn: Callable[[dict[str, Any]], Any]
+
+
+GLOBAL_SENSORS: tuple[GreenboneSensorDescription, ...] = (
+    GreenboneSensorDescription(
+        key="vulnerabilities_total",
+        name="Vulnerabilities Total",
+        icon="mdi:shield-bug",
+        native_unit_of_measurement="vulnerabilities",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data["global"]["total"],
+    ),
+    GreenboneSensorDescription(
+        key="vulnerabilities_critical",
+        name="Vulnerabilities Critical",
+        icon="mdi:shield-alert",
+        native_unit_of_measurement="vulnerabilities",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data["global"]["critical"],
+    ),
+    GreenboneSensorDescription(
+        key="vulnerabilities_high",
+        name="Vulnerabilities High",
+        icon="mdi:shield-alert-outline",
+        native_unit_of_measurement="vulnerabilities",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data["global"]["high"],
+    ),
+    GreenboneSensorDescription(
+        key="vulnerabilities_medium",
+        name="Vulnerabilities Medium",
+        icon="mdi:shield-half-full",
+        native_unit_of_measurement="vulnerabilities",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data["global"]["medium"],
+    ),
+    GreenboneSensorDescription(
+        key="vulnerabilities_low",
+        name="Vulnerabilities Low",
+        icon="mdi:shield-outline",
+        native_unit_of_measurement="vulnerabilities",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data["global"]["low"],
+    ),
+)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    coordinator: GreenboneDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+
+    async_add_entities(
+        GreenboneGlobalSensor(coordinator, entry, description) for description in GLOBAL_SENSORS
+    )
+    async_add_entities([GreenboneTopVulnerabilitiesSensor(coordinator, entry)])
+
+    known_hosts: set[str] = set()
+
+    @callback
+    def _add_new_host_sensors() -> None:
+        current_hosts = set(coordinator.data["by_host"])
+        new_hosts = current_hosts - known_hosts
+        if not new_hosts:
+            return
+        known_hosts.update(new_hosts)
+        new_entities: list[SensorEntity] = []
+        for host_label in new_hosts:
+            new_entities.append(GreenboneHostVulnerabilitySensor(coordinator, entry, host_label))
+            new_entities.extend(
+                GreenboneHostSeveritySensor(coordinator, entry, host_label, severity)
+                for severity in SEVERITIES
+            )
+        async_add_entities(new_entities)
+
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_host_sensors))
+    _add_new_host_sensors()
+
+
+def _hub_device_info(entry: ConfigEntry) -> dict[str, Any]:
+    return {
+        "identifiers": {(DOMAIN, entry.entry_id)},
+        "name": "Greenbone",
+        "manufacturer": "Greenbone",
+        "entry_type": "service",
+    }
+
+
+def _host_device_info(entry: ConfigEntry, host_label: str) -> dict[str, Any]:
+    return {
+        "identifiers": {(DOMAIN, f"{entry.entry_id}_host_{host_label}")},
+        "name": host_label,
+        "manufacturer": "Greenbone",
+        "model": "Scanned Host",
+        "via_device": (DOMAIN, entry.entry_id),
+    }
+
+
+class GreenboneGlobalSensor(CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity):
+    """A global (not per-host) Greenbone metric, driven by a GreenboneSensorDescription."""
+
+    entity_description: GreenboneSensorDescription
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: GreenboneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        description: GreenboneSensorDescription,
+    ) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = _hub_device_info(entry)
+
+    @property
+    def native_value(self) -> Any:
+        return self.entity_description.value_fn(self.coordinator.data)
+
+
+class GreenboneTopVulnerabilitiesSensor(
+    CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity
+):
+    """The highest-severity critical/high vulnerabilities across all scanned hosts.
+
+    The state is just a count; the actual findings (name, CVE, CVSS score, host) live
+    in `extra_state_attributes` since there's no single native HA entity type for a
+    list of structured records.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Top Critical Vulnerabilities"
+    _attr_icon = "mdi:alert-decagram"
+    _attr_native_unit_of_measurement = "vulnerabilities"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: GreenboneDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_top_vulnerabilities"
+        self._attr_device_info = _hub_device_info(entry)
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.data["top_vulnerabilities"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"vulnerabilities": self.coordinator.data["top_vulnerabilities"]}
+
+
+class GreenboneHostVulnerabilitySensor(
+    CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity
+):
+    """Total vulnerability count for a single scanned host, with a severity breakdown.
+
+    Created dynamically as new hosts show up in Greenbone's results - no manual
+    per-host configuration needed. Named by the scan's resolved hostname when
+    available, falling back to the IP.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:monitor-shimmer"
+    _attr_native_unit_of_measurement = "vulnerabilities"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self, coordinator: GreenboneDataUpdateCoordinator, entry: ConfigEntry, host_label: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._host_label = host_label
+        self._attr_name = "Total"
+        self._attr_unique_id = f"{entry.entry_id}_host_{host_label}"
+        self._attr_device_info = _host_device_info(entry, host_label)
+
+    @property
+    def _host_data(self) -> dict[str, int]:
+        return self.coordinator.data["by_host"].get(self._host_label, {})
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._host_label in self.coordinator.data["by_host"]
+
+    @property
+    def native_value(self) -> int:
+        return self._host_data.get("total", 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self._host_data
+        return {
+            "critical": data.get("critical", 0),
+            "high": data.get("high", 0),
+            "medium": data.get("medium", 0),
+            "low": data.get("low", 0),
+        }
+
+
+class GreenboneHostSeveritySensor(
+    CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity
+):
+    """Vulnerability count for one severity level, for a single scanned host.
+
+    Grouped under that host's device alongside its Total sensor, so dashboard
+    tooling (e.g. auto-entities, device cards) can address a single host's full
+    severity breakdown as real entities rather than attributes.
+    """
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "vulnerabilities"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: GreenboneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        host_label: str,
+        severity: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._host_label = host_label
+        self._severity = severity
+        self._attr_name = severity.capitalize()
+        self._attr_icon = SEVERITY_ICONS[severity]
+        self._attr_unique_id = f"{entry.entry_id}_host_{host_label}_{severity}"
+        self._attr_device_info = _host_device_info(entry, host_label)
+
+    @property
+    def _host_data(self) -> dict[str, int]:
+        return self.coordinator.data["by_host"].get(self._host_label, {})
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._host_label in self.coordinator.data["by_host"]
+
+    @property
+    def native_value(self) -> int:
+        return self._host_data.get(self._severity, 0)

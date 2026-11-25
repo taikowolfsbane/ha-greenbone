@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Greenbone",
+        "description": "Enter the connection details for the GMP TCP relay on your Greenbone scanner host (not the web UI port - see the integration's README for setting up the relay).",
+        "data": {
+          "host": "Host (e.g. 192.168.1.50)",
+          "port": "Relay port",
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to Greenbone. Check the host, port, credentials, and that the GMP relay is running and reachable from Home Assistant.",
+      "unknown": "Unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This Greenbone instance is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Greenbone Vulnerabilities Options",
+        "data": {
+          "scan_interval_minutes": "Scan interval (minutes)"
+        }
+      }
+    }
+  }
+}
