@@ -346,7 +346,11 @@ class GreenboneTaskProgressSensor(CoordinatorEntity[GreenboneDataUpdateCoordinat
     @property
     def native_value(self) -> int | None:
         task = self._task
-        return task["progress"] if task else None
+        if task is None:
+            return None
+        # GVM reports -1 when the task isn't currently running (New/Done/Stopped),
+        # not an actual negative percentage - the `status` attribute below says which.
+        return max(task["progress"], 0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
