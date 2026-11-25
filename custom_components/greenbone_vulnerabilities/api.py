@@ -81,14 +81,18 @@ def _empty_counts() -> dict[str, int]:
 
 
 def _empty_host_details() -> dict[str, Any]:
-    return {"ports": set(), "operating_systems": set(), "applications": set()}
+    return {"ports": set(), "operating_systems": set(), "applications": set(), "hostname": None}
 
 
-def _host_label(host_elem) -> str:
-    """Prefer the scan's resolved hostname over the raw IP, falling back to the IP."""
+def _host_ip(host_elem) -> str:
+    """The host's IP, which stays stable across scans regardless of DNS resolution."""
+    return (host_elem.text or "").strip()
+
+
+def _host_hostname(host_elem) -> str | None:
+    """The scan's resolved hostname for this host, if reverse lookup found one."""
     hostname = host_elem.findtext("hostname")
-    ip = (host_elem.text or "").strip()
-    return hostname.strip() if hostname and hostname.strip() else ip
+    return hostname.strip() if hostname and hostname.strip() else None
 
 
 # OID of the "CPE Inventory" NVT, which reports every CPE (operating system, hardware,
@@ -181,8 +185,11 @@ class GreenboneClient:
                     )
                     for result in results.findall("result"):
                         host_elem = result.find("host")
-                        host_label = _host_label(host_elem) if host_elem is not None else "unknown"
-                        details = host_details.setdefault(host_label, _empty_host_details())
+                        host_ip = _host_ip(host_elem) if host_elem is not None else "unknown"
+                        hostname = _host_hostname(host_elem) if host_elem is not None else None
+                        details = host_details.setdefault(host_ip, _empty_host_details())
+                        if hostname:
+                            details["hostname"] = hostname
 
                         nvt = result.find("nvt")
                         port = result.findtext("port") or ""
@@ -205,7 +212,7 @@ class GreenboneClient:
                         global_counts[bucket] += 1
                         global_counts["total"] += 1
 
-                        host_counts = by_host.setdefault(host_label, _empty_counts())
+                        host_counts = by_host.setdefault(host_ip, _empty_counts())
                         host_counts[bucket] += 1
                         host_counts["total"] += 1
 
@@ -219,7 +226,7 @@ class GreenboneClient:
                                     "severity": bucket,
                                     "cvss_score": severity,
                                     "cve": cve_ref.get("id") if cve_ref is not None else None,
-                                    "host": host_label,
+                                    "host": host_ip,
                                 }
                             )
         except GvmError as err:
@@ -233,17 +240,26 @@ class GreenboneClient:
 
         # Every host that ever shows up should get a details entry, even if it had no
         # severity-bucketed findings at all (by_host only tracks hosts with findings).
-        for host_label in host_details:
-            by_host.setdefault(host_label, _empty_counts())
+        for host_ip in host_details:
+            by_host.setdefault(host_ip, _empty_counts())
 
+        # Keyed by IP (stable across scans) rather than the resolved hostname, so a
+        # host doesn't get a brand-new entity the moment reverse lookup starts/stops
+        # resolving it - "label" is just the display name, preferring the hostname.
         host_details_out = {
-            host: {
+            host_ip: {
+                "label": details["hostname"] or host_ip,
                 "ports": sorted(details["ports"]),
                 "operating_systems": sorted(details["operating_systems"]),
                 "applications": sorted(details["applications"]),
             }
-            for host, details in host_details.items()
+            for host_ip, details in host_details.items()
         }
+
+        for candidate in top_candidates:
+            candidate["host"] = host_details_out.get(candidate["host"], {}).get(
+                "label", candidate["host"]
+            )
 
         return {
             "global": global_counts,

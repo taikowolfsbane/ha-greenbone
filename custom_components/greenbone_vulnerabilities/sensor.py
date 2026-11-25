@@ -93,10 +93,10 @@ async def async_setup_entry(
             return
         known_hosts.update(new_hosts)
         new_entities: list[SensorEntity] = []
-        for host_label in new_hosts:
-            new_entities.append(GreenboneHostVulnerabilitySensor(coordinator, entry, host_label))
+        for host_ip in new_hosts:
+            new_entities.append(GreenboneHostVulnerabilitySensor(coordinator, entry, host_ip))
             new_entities.extend(
-                GreenboneHostSeveritySensor(coordinator, entry, host_label, severity)
+                GreenboneHostSeveritySensor(coordinator, entry, host_ip, severity)
                 for severity in SEVERITIES
             )
         async_add_entities(new_entities)
@@ -199,8 +199,9 @@ class GreenboneHostVulnerabilitySensor(
     """Total vulnerability count for a single scanned host, with a severity breakdown.
 
     Created dynamically as new hosts show up in Greenbone's results - no manual
-    per-host configuration needed. Named by the scan's resolved hostname when
-    available, falling back to the IP.
+    per-host configuration needed. Identified internally by IP (stable across scans),
+    but displayed by the scan's resolved hostname when available - so a host doesn't
+    get a brand-new entity the moment reverse lookup starts (or stops) resolving it.
     """
 
     _attr_has_entity_name = True
@@ -209,23 +210,32 @@ class GreenboneHostVulnerabilitySensor(
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
-        self, coordinator: GreenboneDataUpdateCoordinator, entry: ConfigEntry, host_label: str
+        self, coordinator: GreenboneDataUpdateCoordinator, entry: ConfigEntry, host_ip: str
     ) -> None:
         super().__init__(coordinator)
-        self._host_label = host_label
-        # The host label has to be in the entity's own name (not just the device's),
-        # since every per-host sensor now shares the one hub device.
-        self._attr_name = f"{host_label} Total"
-        self._attr_unique_id = f"{entry.entry_id}_host_{host_label}"
+        self._host_ip = host_ip
+        self._attr_unique_id = f"{entry.entry_id}_host_{host_ip}"
         self._attr_device_info = _hub_device_info(entry)
 
     @property
+    def _host_label(self) -> str:
+        return self.coordinator.data["host_details"].get(self._host_ip, {}).get(
+            "label", self._host_ip
+        )
+
+    @property
+    def name(self) -> str:
+        # The host label has to be in the entity's own name (not just the device's),
+        # since every per-host sensor now shares the one hub device.
+        return f"{self._host_label} Total"
+
+    @property
     def _host_data(self) -> dict[str, int]:
-        return self.coordinator.data["by_host"].get(self._host_label, {})
+        return self.coordinator.data["by_host"].get(self._host_ip, {})
 
     @property
     def available(self) -> bool:
-        return super().available and self._host_label in self.coordinator.data["by_host"]
+        return super().available and self._host_ip in self.coordinator.data["by_host"]
 
     @property
     def native_value(self) -> int:
@@ -234,8 +244,9 @@ class GreenboneHostVulnerabilitySensor(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self._host_data
-        details = self.coordinator.data["host_details"].get(self._host_label, {})
+        details = self.coordinator.data["host_details"].get(self._host_ip, {})
         return {
+            "ip": self._host_ip,
             "critical": data.get("critical", 0),
             "high": data.get("high", 0),
             "medium": data.get("medium", 0),
@@ -264,24 +275,30 @@ class GreenboneHostSeveritySensor(
         self,
         coordinator: GreenboneDataUpdateCoordinator,
         entry: ConfigEntry,
-        host_label: str,
+        host_ip: str,
         severity: str,
     ) -> None:
         super().__init__(coordinator)
-        self._host_label = host_label
+        self._host_ip = host_ip
         self._severity = severity
-        self._attr_name = f"{host_label} {severity.capitalize()}"
         self._attr_icon = SEVERITY_ICONS[severity]
-        self._attr_unique_id = f"{entry.entry_id}_host_{host_label}_{severity}"
+        self._attr_unique_id = f"{entry.entry_id}_host_{host_ip}_{severity}"
         self._attr_device_info = _hub_device_info(entry)
 
     @property
+    def name(self) -> str:
+        label = self.coordinator.data["host_details"].get(self._host_ip, {}).get(
+            "label", self._host_ip
+        )
+        return f"{label} {self._severity.capitalize()}"
+
+    @property
     def _host_data(self) -> dict[str, int]:
-        return self.coordinator.data["by_host"].get(self._host_label, {})
+        return self.coordinator.data["by_host"].get(self._host_ip, {})
 
     @property
     def available(self) -> bool:
-        return super().available and self._host_label in self.coordinator.data["by_host"]
+        return super().available and self._host_ip in self.coordinator.data["by_host"]
 
     @property
     def native_value(self) -> int:
