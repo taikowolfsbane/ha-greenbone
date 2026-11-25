@@ -114,13 +114,16 @@ From **Settings → Devices & Services → Greenbone Vulnerabilities → Configu
 - `sensor.vulnerabilities_high`
 - `sensor.vulnerabilities_medium`
 - `sensor.vulnerabilities_low`
-- `sensor.vulnerabilities_<host>` — one per scanned host (its Total), with a
-  critical/high/medium/low breakdown available both as entity attributes and
-  as four separate per-host sensors (below)
-- `sensor.<host>_critical` / `_high` / `_medium` / `_low` — one set per host,
-  grouped under that host's own device so dashboard tooling (e.g. HACS's
-  `auto-entities`) can target a single host's full severity breakdown as real
-  entities
+- `sensor.<host>_total` — one per scanned host, with a critical/high/medium/low
+  breakdown available both as entity attributes and as four separate per-host
+  sensors (below). These all live on the integration's single **Greenbone**
+  device, not a device of their own per host — a home-LAN scan can turn up
+  dozens of hosts, and a device-per-host design would mean Home Assistant
+  prompting you to name/assign an area for every single one, forever, as DHCP
+  leases change. Dashboard tooling (e.g. HACS's `auto-entities`) can still
+  target a single host's sensors by their entity IDs.
+- `sensor.<host>_critical` / `_high` / `_medium` / `_low` — the per-host
+  severity breakdown as individual entities
 - `sensor.top_critical_vulnerabilities` — count of the highest-severity
   critical/high findings across all scanned hosts; the findings themselves
   (name, CVE, CVSS score, host) are in the `vulnerabilities` attribute as a

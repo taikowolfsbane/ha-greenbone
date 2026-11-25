@@ -1,7 +1,7 @@
 {
   "domain": "greenbone_vulnerabilities",
   "name": "Greenbone Vulnerabilities",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "config_flow": true,
   "documentation": "https://github.com/taikowolfsbane/ha-greenbone",
   "issue_tracker": "https://github.com/taikowolfsbane/ha-greenbone/issues",

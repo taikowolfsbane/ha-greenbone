@@ -114,14 +114,12 @@ def _hub_device_info(entry: ConfigEntry) -> dict[str, Any]:
     }
 
 
-def _host_device_info(entry: ConfigEntry, host_label: str) -> dict[str, Any]:
-    return {
-        "identifiers": {(DOMAIN, f"{entry.entry_id}_host_{host_label}")},
-        "name": host_label,
-        "manufacturer": "Greenbone",
-        "model": "Scanned Host",
-        "via_device": (DOMAIN, entry.entry_id),
-    }
+# Deliberately NOT a separate device per host: a home-LAN scan can turn up dozens of
+# hosts, and DHCP churn means that set keeps changing. A device-per-host design makes
+# HA prompt you to name/assign an area for every single one (see HA's "new devices"
+# dialog) - an ever-growing chore for a list this volatile. Per-host sensors are still
+# created dynamically and individually addressable; they just all live on the one
+# Greenbone hub device instead of getting their own.
 
 
 class GreenboneGlobalSensor(CoordinatorEntity[GreenboneDataUpdateCoordinator], SensorEntity):
@@ -196,9 +194,11 @@ class GreenboneHostVulnerabilitySensor(
     ) -> None:
         super().__init__(coordinator)
         self._host_label = host_label
-        self._attr_name = "Total"
+        # The host label has to be in the entity's own name (not just the device's),
+        # since every per-host sensor now shares the one hub device.
+        self._attr_name = f"{host_label} Total"
         self._attr_unique_id = f"{entry.entry_id}_host_{host_label}"
-        self._attr_device_info = _host_device_info(entry, host_label)
+        self._attr_device_info = _hub_device_info(entry)
 
     @property
     def _host_data(self) -> dict[str, int]:
@@ -228,9 +228,9 @@ class GreenboneHostSeveritySensor(
 ):
     """Vulnerability count for one severity level, for a single scanned host.
 
-    Grouped under that host's device alongside its Total sensor, so dashboard
-    tooling (e.g. auto-entities, device cards) can address a single host's full
-    severity breakdown as real entities rather than attributes.
+    Lives alongside that host's Total sensor (both on the shared hub device), so
+    dashboard tooling (e.g. auto-entities) can address a single host's full severity
+    breakdown as real entities rather than attributes.
     """
 
     _attr_has_entity_name = True
@@ -247,10 +247,10 @@ class GreenboneHostSeveritySensor(
         super().__init__(coordinator)
         self._host_label = host_label
         self._severity = severity
-        self._attr_name = severity.capitalize()
+        self._attr_name = f"{host_label} {severity.capitalize()}"
         self._attr_icon = SEVERITY_ICONS[severity]
         self._attr_unique_id = f"{entry.entry_id}_host_{host_label}_{severity}"
-        self._attr_device_info = _host_device_info(entry, host_label)
+        self._attr_device_info = _hub_device_info(entry)
 
     @property
     def _host_data(self) -> dict[str, int]:
